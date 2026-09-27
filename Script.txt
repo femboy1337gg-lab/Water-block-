@@ -1,0 +1,531 @@
+--[[
+    Forsaken Auto Block - Fixed Detection (Working again)
+    No Discord spam + Rayfield + Floating button
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+print("[AB] Loading fixed detection...")
+
+-- ====================== SETTINGS ======================
+local Settings = {
+    AutoBlock = false,
+    AutoPunch = false,
+    PunchAim = false,
+    InfStamina = false,
+    HitboxDrag = false,
+    HitboxShake = false,
+    ShowHitbox = false,
+    FaceCheck = true,
+
+    Range = 16,
+    FacingDot = 0.25,       -- slightly lower so it triggers more
+    BlockDelay = 0.03,
+    HitboxSpeed = 22,
+    HDT_Duration = 0.85,
+}
+
+local lastBlock = 0
+local BLOCK_COOLDOWN = 0.65
+local hdtActiveUntil = 0
+local hdtTarget = nil
+
+-- Remote (exact path from working original)
+local Remote = nil
+pcall(function()
+    Remote = ReplicatedStorage.Modules.Network.Network.RemoteEvent
+end)
+if not Remote then
+    warn("[AB] Remote not found!")
+else
+    print("[AB] Remote OK")
+end
+
+local M1Sounds = {
+    ["rbxassetid://102228729296384"] = true,
+    ["rbxassetid://140242176732868"] = true,
+    ["rbxassetid://112809109188560"] = true,
+    ["rbxassetid://136323728355613"] = true,
+    ["rbxassetid://115026634746636"] = true,
+    ["rbxassetid://84116622032112"] = true,
+    ["rbxassetid://108907358619313"] = true,
+    ["rbxassetid://127793641088496"] = true,
+    ["rbxassetid://86174610237192"] = true,
+    ["rbxassetid://95079963655241"] = true,
+    ["rbxassetid://101199185291628"] = true,
+    ["rbxassetid://119942598489800"] = true,
+    ["rbxassetid://84307400688050"] = true,
+    ["rbxassetid://113037804008732"] = true,
+    ["rbxassetid://105200830849301"] = true,
+    ["rbxassetid://75330693422988"] = true,
+    ["rbxassetid://82221759983649"] = true,
+    ["rbxassetid://81702359653578"] = true,
+    ["rbxassetid://108610718831698"] = true,
+    ["rbxassetid://112395455254818"] = true,
+    ["rbxassetid://109431876587852"] = true,
+    ["rbxassetid://109348678063422"] = true,
+    ["rbxassetid://85853080745515"] = true,
+    ["rbxassetid://98733709078792"] = true,
+    ["rbxassetid://105840448036441"] = true,
+    ["rbxassetid://114742322778642"] = true,
+    ["rbxassetid://105415540898010"] = true,
+    ["rbxassetid://106300477136129"] = true,
+    ["rbxassetid://80516583309685"] = true,
+    ["rbxassetid://116581754553533"] = true,
+    ["rbxassetid://71834552297085"] = true,
+    ["rbxassetid://119583605486352"] = true,
+    ["rbxassetid://117173212095661"] = true,
+    ["rbxassetid://104910828105172"] = true,
+    ["rbxassetid://79980897195554"] = true,
+    ["rbxassetid://116527305931161"] = true,
+    ["rbxassetid://131406927389838"] = true,
+    ["rbxassetid://94317217837143"] = true,
+    ["rbxassetid://121954639447247"] = true,
+    ["rbxassetid://128856426573270"] = true,
+    ["rbxassetid://131123355704017"] = true,
+    ["rbxassetid://107444859834748"] = true,
+    ["rbxassetid://133709029886490"] = true,
+}
+
+local function fireBlock()
+    if not Remote then return end
+    if tick() - lastBlock < BLOCK_COOLDOWN then return end
+    lastBlock = tick()
+    pcall(function()
+        Remote:FireServer("UseActorAbility", {"Block"})
+    end)
+    print("[AB] âœ“ Block fired")
+end
+
+local function firePunch()
+    if not Remote then return end
+    pcall(function()
+        Remote:FireServer("UseActorAbility", {"Punch"})
+    end)
+end
+
+local function getMyRoot()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+local function getKillers()
+    local folder = workspace:FindFirstChild("Players")
+    return folder and folder:FindFirstChild("Killers")
+end
+
+local function isInRound()
+    local char = LocalPlayer.Character
+    if not char then return false end
+    local survivors = workspace:FindFirstChild("Players") and workspace.Players:FindFirstChild("Survivors")
+    if not survivors then return false end
+    return char:IsDescendantOf(survivors)
+end
+
+-- ====================== INF STAMINA ======================
+RunService.Heartbeat:Connect(function()
+    if not Settings.InfStamina or not isInRound() then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+
+    local attr = char:GetAttribute("Stamina") or char:GetAttribute("stamina")
+    if typeof(attr) == "number" and attr <= 1.5 then
+        pcall(function()
+            char:SetAttribute("Stamina", 100)
+            char:SetAttribute("stamina", 100)
+        end)
+    end
+
+    for _, v in ipairs(char:GetDescendants()) do
+        if (v:IsA("NumberValue") or v:IsA("IntValue")) and v.Name:lower():find("stam") then
+            if v.Value <= 1.5 then
+                v.Value = 100
+            end
+        end
+    end
+end)
+
+-- ====================== PUNCH AIM ======================
+local function aimAtNearestKiller()
+    if not Settings.PunchAim then return end
+    local myRoot = getMyRoot()
+    if not myRoot then return end
+
+    local closest, closestDist = nil, math.huge
+    local killers = getKillers()
+    if killers then
+        for _, killer in ipairs(killers:GetChildren()) do
+            local kRoot = killer:FindFirstChild("HumanoidRootPart")
+            if kRoot then
+                local d = (myRoot.Position - kRoot.Position).Magnitude
+                if d < closestDist then
+                    closest = kRoot
+                    closestDist = d
+                end
+            end
+        end
+    end
+
+    if closest and closestDist < 45 then
+        local look = (closest.Position - myRoot.Position) * Vector3.new(1, 0, 1)
+        if look.Magnitude > 0.05 then
+            myRoot.CFrame = CFrame.lookAt(myRoot.Position, myRoot.Position + look)
+            local cam = workspace.CurrentCamera
+            if cam then
+                cam.CFrame = CFrame.new(cam.CFrame.Position, closest.Position)
+            end
+        end
+    end
+end
+
+-- ====================== HITBOX VISUAL ======================
+local detectionPart = nil
+
+local function destroyHitbox()
+    if detectionPart then
+        detectionPart:Destroy()
+        detectionPart = nil
+    end
+end
+
+local function updateVisuals()
+    local myRoot = getMyRoot()
+    if not (Settings.ShowHitbox and myRoot and isInRound()) then
+        destroyHitbox()
+        return
+    end
+
+    local size = Settings.Range * 2
+    if not detectionPart or not detectionPart.Parent then
+        detectionPart = Instance.new("Part")
+        detectionPart.Name = "AB_Hitbox"
+        detectionPart.Shape = Enum.PartType.Ball
+        detectionPart.Anchored = true
+        detectionPart.CanCollide = false
+        detectionPart.CanQuery = false
+        detectionPart.CanTouch = false
+        detectionPart.CastShadow = false
+        detectionPart.Material = Enum.Material.ForceField
+        detectionPart.Color = Color3.fromRGB(0, 255, 120)
+        detectionPart.Transparency = 0.65
+        detectionPart.Parent = workspace
+    end
+    detectionPart.Size = Vector3.new(size, size, size)
+    detectionPart.Position = myRoot.Position
+end
+RunService.RenderStepped:Connect(updateVisuals)
+LocalPlayer.CharacterRemoving:Connect(destroyHitbox)
+
+-- ====================== AUTO BLOCK (restored working logic) ======================
+local killerConns = {}
+
+local function onM1Detected(killerRoot)
+    if not Settings.AutoBlock then return end
+    if not isInRound() then return end
+
+    local myRoot = getMyRoot()
+    if not myRoot then return end
+
+    local dist = (myRoot.Position - killerRoot.Position).Magnitude
+    if dist > Settings.Range then return end
+
+    if Settings.FaceCheck then
+        local dir = (myRoot.Position - killerRoot.Position).Unit
+        local facing = killerRoot.CFrame.LookVector:Dot(dir)
+        if facing < Settings.FacingDot then
+            return
+        end
+    end
+
+    print("[AB] M1 detected - blocking")
+    task.delay(Settings.BlockDelay, function()
+        if not Settings.AutoBlock then return end
+        fireBlock()
+
+        if Settings.AutoPunch then
+            task.delay(0.28, function()
+                if Settings.AutoBlock then
+                    if Settings.PunchAim then aimAtNearestKiller() end
+                    firePunch()
+                end
+            end)
+        end
+
+        if Settings.HitboxDrag then
+            hdtTarget = killerRoot
+            hdtActiveUntil = tick() + Settings.HDT_Duration
+        end
+    end)
+end
+
+local function hookKiller(killer)
+    if killerConns[killer] then return end
+    local root = killer:FindFirstChild("HumanoidRootPart") or killer:WaitForChild("HumanoidRootPart", 4)
+    if not root then return end
+
+    local conn = root.DescendantAdded:Connect(function(obj)
+        if obj:IsA("Sound") and M1Sounds[obj.SoundId] then
+            onM1Detected(root)
+        end
+    end)
+    killerConns[killer] = conn
+    print("[AB] Hooked killer:", killer.Name)
+end
+
+-- Global sound listener (backup)
+workspace.DescendantAdded:Connect(function(obj)
+    if obj:IsA("Sound") then
+        obj.Played:Connect(function()
+            if not M1Sounds[obj.SoundId] then return end
+            if not Settings.AutoBlock or not isInRound() then return end
+
+            local myRoot = getMyRoot()
+            if not myRoot then return end
+
+            local killers = getKillers()
+            if not killers then return end
+
+            for _, killer in ipairs(killers:GetChildren()) do
+                local kRoot = killer:FindFirstChild("HumanoidRootPart")
+                if kRoot then
+                    local dist = (myRoot.Position - kRoot.Position).Magnitude
+                    if dist <= Settings.Range + 3 then
+                        onM1Detected(kRoot)
+                        break
+                    end
+                end
+            end
+        end)
+    end
+end)
+
+local function startAutoBlock(state)
+    Settings.AutoBlock = state
+    local killers = getKillers()
+
+    if state then
+        if killers then
+            for _, killer in ipairs(killers:GetChildren()) do
+                hookKiller(killer)
+            end
+            killers.ChildAdded:Connect(hookKiller)
+        end
+        print("[AB] Auto Block ENABLED")
+    else
+        for _, conn in pairs(killerConns) do
+            conn:Disconnect()
+        end
+        table.clear(killerConns)
+        hdtActiveUntil = 0
+        hdtTarget = nil
+        print("[AB] Auto Block DISABLED")
+    end
+end
+
+-- HDT
+RunService.Heartbeat:Connect(function()
+    if not Settings.HitboxDrag then return end
+    if tick() > hdtActiveUntil or not hdtTarget or not hdtTarget.Parent then
+        hdtTarget = nil
+        return
+    end
+    if not isInRound() then return end
+
+    local myRoot = getMyRoot()
+    if not myRoot then return end
+
+    local dist = (hdtTarget.Position - myRoot.Position).Magnitude
+    if dist < 4 then return end
+
+    local dir = (hdtTarget.Position - myRoot.Position).Unit
+    local speed = Settings.HitboxSpeed
+    if dist > 10 then speed = speed + 5 end
+
+    local shake = Settings.HitboxShake and Vector3.new(
+        math.random(-10,10)/100, math.random(-5,5)/100, math.random(-10,10)/100
+    ) or Vector3.zero
+
+    myRoot.Velocity = dir * speed + shake
+end)
+
+-- ====================== FLOATING BUTTON ======================
+local gui = Instance.new("ScreenGui")
+gui.Name = "AB_Toggle"
+gui.ResetOnSpawn = false
+pcall(function() gui.Parent = CoreGui end)
+if not gui.Parent then gui.Parent = PlayerGui end
+
+local btn = Instance.new("TextButton")
+btn.Size = UDim2.new(0, 150, 0, 46)
+btn.Position = UDim2.new(0.5, -75, 0.82, 0)
+btn.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+btn.Text = "Auto Block: OFF"
+btn.TextColor3 = Color3.fromRGB(255, 80, 80)
+btn.Font = Enum.Font.GothamBold
+btn.TextSize = 16
+btn.Parent = gui
+Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 10)
+local stroke = Instance.new("UIStroke", btn)
+stroke.Thickness = 1.8
+stroke.Color = Color3.fromRGB(255, 80, 80)
+
+local dragging, dragStart, startPos
+btn.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = btn.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - dragStart
+        btn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+
+local function updateBtn()
+    if Settings.AutoBlock then
+        btn.Text = "Auto Block: ON"
+        btn.TextColor3 = Color3.fromRGB(80, 255, 120)
+        stroke.Color = Color3.fromRGB(80, 255, 120)
+    else
+        btn.Text = "Auto Block: OFF"
+        btn.TextColor3 = Color3.fromRGB(255, 80, 80)
+        stroke.Color = Color3.fromRGB(255, 80, 80)
+    end
+end
+
+btn.MouseButton1Click:Connect(function()
+    startAutoBlock(not Settings.AutoBlock)
+    updateBtn()
+end)
+updateBtn()
+
+-- ====================== RAYFIELD ======================
+local success, Rayfield = pcall(function()
+    return loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+end)
+
+if success and Rayfield then
+    local Window = Rayfield:CreateWindow({
+        Name = "Forsaken Auto Block",
+        LoadingTitle = "Detection Fixed",
+        LoadingSubtitle = "Should block again",
+        ConfigurationSaving = {Enabled = true, FolderName = "ForsakenAB", FileName = "Config"},
+        KeySystem = false
+    })
+
+    local Tab = Window:CreateTab("Main", 4483362458)
+
+    Tab:CreateToggle({
+        Name = "Auto Block",
+        CurrentValue = false,
+        Flag = "AB",
+        Callback = function(v)
+            startAutoBlock(v)
+            updateBtn()
+        end
+    })
+
+    Tab:CreateToggle({
+        Name = "Face Check",
+        CurrentValue = true,
+        Flag = "FC",
+        Callback = function(v) Settings.FaceCheck = v end
+    })
+
+    Tab:CreateToggle({
+        Name = "Show Detection Hitbox",
+        CurrentValue = false,
+        Flag = "SH",
+        Callback = function(v)
+            Settings.ShowHitbox = v
+            updateVisuals()
+        end
+    })
+
+    Tab:CreateToggle({
+        Name = "Auto Punch",
+        CurrentValue = false,
+        Flag = "AP",
+        Callback = function(v) Settings.AutoPunch = v end
+    })
+
+    Tab:CreateToggle({
+        Name = "Punch Aim",
+        CurrentValue = false,
+        Flag = "PA",
+        Callback = function(v) Settings.PunchAim = v end
+    })
+
+    Tab:CreateToggle({
+        Name = "Inf Stamina (when <= 1)",
+        CurrentValue = false,
+        Flag = "IS",
+        Callback = function(v) Settings.InfStamina = v end
+    })
+
+    Tab:CreateToggle({
+        Name = "Hitbox Drag (HDT)",
+        CurrentValue = false,
+        Flag = "HDT",
+        Callback = function(v) Settings.HitboxDrag = v end
+    })
+
+    Tab:CreateSlider({
+        Name = "Detection Range",
+        Range = {10, 22},
+        Increment = 1,
+        CurrentValue = 16,
+        Flag = "Range",
+        Callback = function(v)
+            Settings.Range = v
+            updateVisuals()
+        end
+    })
+
+    Tab:CreateSlider({
+        Name = "Facing Strength",
+        Range = {0.1, 0.6},
+        Increment = 0.05,
+        CurrentValue = 0.25,
+        Flag = "Face",
+        Callback = function(v) Settings.FacingDot = v end
+    })
+
+    Tab:CreateSlider({
+        Name = "Block Delay",
+        Range = {0, 0.12},
+        Increment = 0.01,
+        CurrentValue = 0.03,
+        Flag = "Delay",
+        Callback = function(v) Settings.BlockDelay = v end
+    })
+
+    Tab:CreateButton({
+        Name = "Destroy Script",
+        Callback = function()
+            startAutoBlock(false)
+            destroyHitbox()
+            gui:Destroy()
+            Rayfield:Destroy()
+        end
+    })
+
+    Rayfield:Notify({Title = "Ready", Content = "Turn Auto Block ON and test. Watch console for 'M1 detected'.", Duration = 5})
+else
+    warn("[AB] Rayfield failed - floating button still works")
+end
+
+print("[AB] Ready - turn Auto Block ON and check console when killer swings")
